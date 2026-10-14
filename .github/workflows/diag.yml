@@ -1,8 +1,8 @@
 # Disposable diagnostics for alire-project/alire-index#2230 macOS failures.
-# Run 2: the macos-26-arm64 image with Command Line Tools 27 is being rolled
-# out gradually, so several replicas are started; each exits immediately on an
-# older image and runs the complete matrix on the new one.
-# Not intended for upstream submission.
+# Run 3: on the CLT 27 image, compare the unmodified upstream
+# alire-index-checks gh-build-crate.sh with the proposed SDKROOT patch, for
+# stable and development alr, each attempt from a clean Alire state.
+# Replicas exit immediately on older images. Not for upstream submission.
 name: Diag macOS CLT 27 GNAT link
 
 on:
@@ -14,11 +14,11 @@ jobs:
   newimage:
     name: replica ${{ matrix.replica }}
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
-        replica: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        replica: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Classify runner image
         id: img
@@ -38,13 +38,20 @@ jobs:
           repository: alire-project/alire-index
           ref: refs/pull/2230/merge
           fetch-depth: 0
-      - name: Check out alire-index-checks (as upstream CI)
+      - name: Check out upstream alire-index-checks stable-1.4.0
         if: steps.img.outputs.new == 'true'
         uses: actions/checkout@v4
         with:
           repository: alire-project/alire-index-checks
           ref: stable-1.4.0
-          path: alire-index-checks
+          path: checks-upstream
+      - name: Check out patched alire-index-checks
+        if: steps.img.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: zackboll/alire-index-checks
+          ref: fix/macos-sdkroot-consistency
+          path: checks-patched
       - name: Check out diagnostics
         if: steps.img.outputs.new == 'true'
         uses: actions/checkout@v4
@@ -56,63 +63,41 @@ jobs:
         uses: alire-project/setup-alire@latest
         with:
           version: 2.1.1
-      - name: Minimal Ada and Ada+C++ link matrix (GNAT 16.1.0)
-        if: steps.img.outputs.new == 'true'
-        run: |
-          alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
-          gnat_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gnat_native_16.1.0_*/bin | head -1)
-          gpr_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gprbuild_26.0.1_*/bin | head -1)
-          bash diagsrc/diag/minimal.sh "$gnat_bin" "$gpr_bin" "$RUNNER_TEMP/minimal.txt"
-
-      - name: stable none
-        id: stable_none
+      - name: stable upstream
+        id: stable_upstream
         if: steps.img.outputs.new == 'true'
         continue-on-error: true
-        run: bash diagsrc/diag/exact.sh none stable
-      - name: stable sdkroot
-        id: stable_sdkroot
+        run: bash diagsrc/diag/exact2.sh upstream stable
+      - name: stable patched
+        id: stable_patched
         if: steps.img.outputs.new == 'true'
         continue-on-error: true
-        run: bash diagsrc/diag/exact.sh sdkroot stable
-      - name: stable clt
-        id: stable_clt
-        if: steps.img.outputs.new == 'true'
-        continue-on-error: true
-        run: bash diagsrc/diag/exact.sh clt stable
+        run: bash diagsrc/diag/exact2.sh patched stable
 
       - name: Set up devel alr
         if: steps.img.outputs.new == 'true'
         uses: alire-project/setup-alire@latest
         with:
           branch: master
-      - name: dev none
-        id: dev_none
+      - name: dev upstream
+        id: dev_upstream
         if: steps.img.outputs.new == 'true'
         continue-on-error: true
-        run: bash diagsrc/diag/exact.sh none dev
-      - name: dev sdkroot
-        id: dev_sdkroot
+        run: bash diagsrc/diag/exact2.sh upstream dev
+      - name: dev patched
+        id: dev_patched
         if: steps.img.outputs.new == 'true'
         continue-on-error: true
-        run: bash diagsrc/diag/exact.sh sdkroot dev
-      - name: dev clt
-        id: dev_clt
-        if: steps.img.outputs.new == 'true'
-        continue-on-error: true
-        run: bash diagsrc/diag/exact.sh clt dev
+        run: bash diagsrc/diag/exact2.sh patched dev
 
       - name: Verdict
         if: steps.img.outputs.new == 'true'
         run: |
-          echo "stable none=${{ steps.stable_none.outcome }} sdkroot=${{ steps.stable_sdkroot.outcome }} clt=${{ steps.stable_clt.outcome }}"
-          echo "dev    none=${{ steps.dev_none.outcome }} sdkroot=${{ steps.dev_sdkroot.outcome }} clt=${{ steps.dev_clt.outcome }}"
-          cat "$RUNNER_TEMP"/exact-*.summary 2>/dev/null || true
-          cat "$RUNNER_TEMP/minimal.txt" 2>/dev/null || true
-          # Expected: unmodified environment reproduces the failure; both
-          # environment selections pass the complete suite.
-          [ "${{ steps.stable_none.outcome }}" = failure ] &&
-          [ "${{ steps.stable_sdkroot.outcome }}" = success ] &&
-          [ "${{ steps.stable_clt.outcome }}" = success ] &&
-          [ "${{ steps.dev_none.outcome }}" = failure ] &&
-          [ "${{ steps.dev_sdkroot.outcome }}" = success ] &&
-          [ "${{ steps.dev_clt.outcome }}" = success ]
+          echo "stable upstream=${{ steps.stable_upstream.outcome }} patched=${{ steps.stable_patched.outcome }}"
+          echo "dev    upstream=${{ steps.dev_upstream.outcome }} patched=${{ steps.dev_patched.outcome }}"
+          cat "$RUNNER_TEMP"/exact-*.summary
+          # Expected: unmodified checks reproduce the failure; the patch passes.
+          [ "${{ steps.stable_upstream.outcome }}" = failure ] &&
+          [ "${{ steps.stable_patched.outcome }}" = success ] &&
+          [ "${{ steps.dev_upstream.outcome }}" = failure ] &&
+          [ "${{ steps.dev_patched.outcome }}" = success ]
