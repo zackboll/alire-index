@@ -5,7 +5,7 @@ name: Build Crate (Distro toolchain)
 # and using the distro-supplied GNAT compiler (with Alire's FSF fallback).
 
 env:
-  CHECKS_ORG: alire-project
+  CHECKS_ORG: zackboll  # TEST HARNESS ONLY: patched alire-index-checks fork
   CHECKS_REPO: alire-index-checks
   ALR_VERSION: 2.1.1
 
@@ -51,7 +51,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: ${{env.CHECKS_ORG}}/${{env.CHECKS_REPO}}
-        ref: ${{github.base_ref}}
+        ref: fix/macos-sdkroot-consistency  # TEST HARNESS ONLY
         path: ${{env.CHECKS_REPO}}
 
     - name: Set up stable `alr`
