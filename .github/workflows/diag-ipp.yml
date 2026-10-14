@@ -1,0 +1,65 @@
+# Disposable diagnostics for the macos-15-intel "Subpixel top-right" failure in
+# alire-project/alire-index#2230. Not intended for upstream submission.
+name: Diag macOS Intel IPP subpixel
+
+on:
+  push:
+    branches: [diag/macos-intel-ipp-subpixel]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    name: probe ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Homebrew OpenCV (as index CI)
+        run: brew install opencv
+      - name: Build and run native getRectSubPix probe
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion arch=$(uname -m)"
+          brew info --json=v2 opencv | python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print("opencv", f["installed"][0]["version"])'
+          pc=$(pkg-config --exists opencv5 && echo opencv5 || echo opencv4)
+          xcrun clang++ -std=c++17 -O1 diag/ipp/probe.cpp $(pkg-config --cflags --libs $pc) -o probe
+          ./probe
+
+  suite:
+    name: suite ${{ matrix.os }} OPENCV_IPP=${{ matrix.ipp }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel]
+        ipp: [default, disabled]
+    steps:
+      - name: Check out immutable Imgproc tag 0.2.0
+        uses: actions/checkout@v4
+        with:
+          repository: zackboll/opencv_imgproc_ada
+          ref: refs/tags/0.2.0
+      - uses: alire-project/setup-alire@latest
+        with:
+          version: 2.1.1
+      - name: Install Homebrew OpenCV (as index CI)
+        run: brew install opencv
+      - name: Run full AUnit suite against indexed Core 0.4.1
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          [ "$(git rev-parse HEAD)" = 08724e9ce0753546709345d5b657eff714748e04 ]
+          if [ "${{ matrix.ipp }}" = disabled ]; then export OPENCV_IPP=disabled; fi
+          echo "OPENCV_IPP=${OPENCV_IPP-<unset>} ImageVersion=$ImageVersion"
+          alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+          alr -n build
+          alr -n -C tests show --solve | sed -n '/Dependencies (solution)/,$p'
+          alr -n -C tests run 2>&1 | tee "$RUNNER_TEMP/suite.log"
+          status=${PIPESTATUS[0]}
+          echo "===== SUMMARY OPENCV_IPP=${OPENCV_IPP-<unset>} exit=$status"
+          grep -E '^FAIL |Total Tests Run|Successful Tests|Failed Assertions|Unexpected Errors|IPP' "$RUNNER_TEMP/suite.log" || true
+          exit $status
