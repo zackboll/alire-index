@@ -1,4 +1,7 @@
 # Disposable diagnostics for alire-project/alire-index#2230 macOS failures.
+# Run 2: the macos-26-arm64 image with Command Line Tools 27 is being rolled
+# out gradually, so several replicas are started; each exits immediately on an
+# older image and runs the complete matrix on the new one.
 # Not intended for upstream submission.
 name: Diag macOS CLT 27 GNAT link
 
@@ -8,86 +11,108 @@ on:
   workflow_dispatch:
 
 jobs:
-  minimal:
-    name: minimal ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+  newimage:
+    name: replica ${{ matrix.replica }}
+    runs-on: macos-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, macos-26, macos-15-intel]
+        replica: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     steps:
-      - uses: actions/checkout@v4
-      - uses: alire-project/setup-alire@latest
-        with:
-          version: 2.1.1
-      - name: Select exact toolchain
+      - name: Classify runner image
+        id: img
         run: |
-          alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
-          alr toolchain
-      - name: Minimal Ada and Ada+C++ link matrix
-        run: |
-          gnat_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gnat_native_16.1.0_*/bin | head -1)
-          gpr_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gprbuild_26.0.1_*/bin | head -1)
-          bash diag/minimal.sh "$gnat_bin" "$gpr_bin" "$RUNNER_TEMP/results.txt"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: minimal-${{ matrix.os }}
-          path: ${{ runner.temp }}/results.txt
+          clt=$(pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | sed -n 's/^version: //p')
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion CLT=$clt"
+          case "$clt" in
+            27.*) echo "new=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "new=false" >> "$GITHUB_OUTPUT"
+               echo "::notice::replica ${{ matrix.replica }}: CLT $clt on $ImageVersion is not the CLT 27 image; nothing to test" ;;
+          esac
 
-  exact:
-    name: exact ${{ matrix.os }} ${{ matrix.alr }} ${{ matrix.remedy }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 75
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest]
-        alr: [stable, dev]
-        remedy: [none, sdkroot, clt]
-    steps:
       - name: Check out alire-index PR 2230 merge ref (as upstream CI)
+        if: steps.img.outputs.new == 'true'
         uses: actions/checkout@v4
         with:
           repository: alire-project/alire-index
           ref: refs/pull/2230/merge
           fetch-depth: 0
       - name: Check out alire-index-checks (as upstream CI)
+        if: steps.img.outputs.new == 'true'
         uses: actions/checkout@v4
         with:
           repository: alire-project/alire-index-checks
           ref: stable-1.4.0
           path: alire-index-checks
+      - name: Check out diagnostics
+        if: steps.img.outputs.new == 'true'
+        uses: actions/checkout@v4
+        with:
+          path: diagsrc
+
       - name: Set up stable alr
-        if: matrix.alr == 'stable'
+        if: steps.img.outputs.new == 'true'
         uses: alire-project/setup-alire@latest
         with:
           version: 2.1.1
+      - name: Minimal Ada and Ada+C++ link matrix (GNAT 16.1.0)
+        if: steps.img.outputs.new == 'true'
+        run: |
+          alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+          gnat_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gnat_native_16.1.0_*/bin | head -1)
+          gpr_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gprbuild_26.0.1_*/bin | head -1)
+          bash diagsrc/diag/minimal.sh "$gnat_bin" "$gpr_bin" "$RUNNER_TEMP/minimal.txt"
+
+      - name: stable none
+        id: stable_none
+        if: steps.img.outputs.new == 'true'
+        continue-on-error: true
+        run: bash diagsrc/diag/exact.sh none stable
+      - name: stable sdkroot
+        id: stable_sdkroot
+        if: steps.img.outputs.new == 'true'
+        continue-on-error: true
+        run: bash diagsrc/diag/exact.sh sdkroot stable
+      - name: stable clt
+        id: stable_clt
+        if: steps.img.outputs.new == 'true'
+        continue-on-error: true
+        run: bash diagsrc/diag/exact.sh clt stable
+
       - name: Set up devel alr
-        if: matrix.alr == 'dev'
+        if: steps.img.outputs.new == 'true'
         uses: alire-project/setup-alire@latest
         with:
           branch: master
-      - name: Record identities
+      - name: dev none
+        id: dev_none
+        if: steps.img.outputs.new == 'true'
+        continue-on-error: true
+        run: bash diagsrc/diag/exact.sh none dev
+      - name: dev sdkroot
+        id: dev_sdkroot
+        if: steps.img.outputs.new == 'true'
+        continue-on-error: true
+        run: bash diagsrc/diag/exact.sh sdkroot dev
+      - name: dev clt
+        id: dev_clt
+        if: steps.img.outputs.new == 'true'
+        continue-on-error: true
+        run: bash diagsrc/diag/exact.sh clt dev
+
+      - name: Verdict
+        if: steps.img.outputs.new == 'true'
         run: |
-          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
-          git log -3 --format='%H %s'
-          git -C alire-index-checks log -1 --format='%H %s'
-          pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version
-          xcode-select -p
-          alr --version
-      - name: Test crate (unmodified upstream gh-build-crate.sh)
-        shell: bash
-        run: |
-          case "${{ matrix.remedy }}" in
-            none) ;;
-            sdkroot) export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" ;;
-            clt) export DEVELOPER_DIR=/Library/Developer/CommandLineTools ;;
-          esac
-          echo "REMEDY=${{ matrix.remedy }} SDKROOT=${SDKROOT-<unset>} DEVELOPER_DIR=${DEVELOPER_DIR-<unset>}"
-          alire-index-checks/scripts/gh-build-crate.sh 2>&1 | tee "$RUNNER_TEMP/crate.log"
-          status=${PIPESTATUS[0]}
-          echo "===== SUMMARY remedy=${{ matrix.remedy }} alr=${{ matrix.alr }} image=$ImageVersion exit=$status"
-          grep -E 'TEST RESULT|Total Tests Run|Successful Tests|Failed Assertions|Unexpected Errors|^FAIL |malformed file|CRATE .* TEST ENDED' "$RUNNER_TEMP/crate.log" || true
-          exit $status
+          echo "stable none=${{ steps.stable_none.outcome }} sdkroot=${{ steps.stable_sdkroot.outcome }} clt=${{ steps.stable_clt.outcome }}"
+          echo "dev    none=${{ steps.dev_none.outcome }} sdkroot=${{ steps.dev_sdkroot.outcome }} clt=${{ steps.dev_clt.outcome }}"
+          cat "$RUNNER_TEMP"/exact-*.summary 2>/dev/null || true
+          cat "$RUNNER_TEMP/minimal.txt" 2>/dev/null || true
+          # Expected: unmodified environment reproduces the failure; both
+          # environment selections pass the complete suite.
+          [ "${{ steps.stable_none.outcome }}" = failure ] &&
+          [ "${{ steps.stable_sdkroot.outcome }}" = success ] &&
+          [ "${{ steps.stable_clt.outcome }}" = success ] &&
+          [ "${{ steps.dev_none.outcome }}" = failure ] &&
+          [ "${{ steps.dev_sdkroot.outcome }}" = success ] &&
+          [ "${{ steps.dev_clt.outcome }}" = success ]

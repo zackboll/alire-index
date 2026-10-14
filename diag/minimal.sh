@@ -57,6 +57,20 @@ g++ -v 2>&1 | tail -3
 echo "g++ -print-sysroot: '$(g++ -print-sysroot)'"
 echo "g++ -print-prog-name=ld: $(g++ -print-prog-name=ld)"
 echo "g++ -print-prog-name=collect2: $(g++ -print-prog-name=collect2)"
+gnat_ld=$(g++ -print-prog-name=ld)
+echo "--- GNAT linker entry: $gnat_ld"
+ls -la "$gnat_ld"
+file "$gnat_ld"
+if file "$gnat_ld" | grep -qi text; then sed -n '1,60p' "$gnat_ld"; fi
+"$gnat_ld" -v 2>&1 | head -3
+echo "--- Apple linkers present"
+ls -la /Library/Developer/CommandLineTools/usr/bin/ld* \
+   "$(xcode-select -p)"/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld* 2>&1
+echo "xcrun --find ld-classic: $(xcrun --find ld-classic 2>&1)"
+for l in /Library/Developer/CommandLineTools/usr/bin/ld-classic \
+         "$(xcode-select -p)"/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld-classic; do
+   [ -x "$l" ] && { echo "--- $l -v"; "$l" -v 2>&1 | head -2; }
+done
 gprbuild --version | head -1
 gnatls -v 2>&1 | sed -n '/Object Search Path/,/Project Search Path/p' | head -6
 
