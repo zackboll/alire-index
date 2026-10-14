@@ -1,0 +1,11 @@
+project Mixed is
+   for Languages use ("Ada", "C++");
+   for Source_Dirs use (".");
+   for Object_Dir use "obj";
+   for Exec_Dir use "bin";
+   for Main use ("mixed.adb");
+   for Create_Missing_Dirs use "True";
+   package Linker is
+      for Default_Switches ("Ada") use ("-lstdc++");
+   end Linker;
+end Mixed;

@@ -1,0 +1,93 @@
+# Disposable diagnostics for alire-project/alire-index#2230 macOS failures.
+# Not intended for upstream submission.
+name: Diag macOS CLT 27 GNAT link
+
+on:
+  push:
+    branches: [diag/macos-clt27-gnat-link]
+  workflow_dispatch:
+
+jobs:
+  minimal:
+    name: minimal ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-26, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: alire-project/setup-alire@latest
+        with:
+          version: 2.1.1
+      - name: Select exact toolchain
+        run: |
+          alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+          alr toolchain
+      - name: Minimal Ada and Ada+C++ link matrix
+        run: |
+          gnat_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gnat_native_16.1.0_*/bin | head -1)
+          gpr_bin=$(ls -d "$HOME"/.local/share/alire/toolchains/gprbuild_26.0.1_*/bin | head -1)
+          bash diag/minimal.sh "$gnat_bin" "$gpr_bin" "$RUNNER_TEMP/results.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: minimal-${{ matrix.os }}
+          path: ${{ runner.temp }}/results.txt
+
+  exact:
+    name: exact ${{ matrix.os }} ${{ matrix.alr }} ${{ matrix.remedy }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+        alr: [stable, dev]
+        remedy: [none, sdkroot, clt]
+    steps:
+      - name: Check out alire-index PR 2230 merge ref (as upstream CI)
+        uses: actions/checkout@v4
+        with:
+          repository: alire-project/alire-index
+          ref: refs/pull/2230/merge
+          fetch-depth: 0
+      - name: Check out alire-index-checks (as upstream CI)
+        uses: actions/checkout@v4
+        with:
+          repository: alire-project/alire-index-checks
+          ref: stable-1.4.0
+          path: alire-index-checks
+      - name: Set up stable alr
+        if: matrix.alr == 'stable'
+        uses: alire-project/setup-alire@latest
+        with:
+          version: 2.1.1
+      - name: Set up devel alr
+        if: matrix.alr == 'dev'
+        uses: alire-project/setup-alire@latest
+        with:
+          branch: master
+      - name: Record identities
+        run: |
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
+          git log -3 --format='%H %s'
+          git -C alire-index-checks log -1 --format='%H %s'
+          pkgutil --pkg-info=com.apple.pkg.CLTools_Executables | grep version
+          xcode-select -p
+          alr --version
+      - name: Test crate (unmodified upstream gh-build-crate.sh)
+        shell: bash
+        run: |
+          case "${{ matrix.remedy }}" in
+            none) ;;
+            sdkroot) export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" ;;
+            clt) export DEVELOPER_DIR=/Library/Developer/CommandLineTools ;;
+          esac
+          echo "REMEDY=${{ matrix.remedy }} SDKROOT=${SDKROOT-<unset>} DEVELOPER_DIR=${DEVELOPER_DIR-<unset>}"
+          alire-index-checks/scripts/gh-build-crate.sh 2>&1 | tee "$RUNNER_TEMP/crate.log"
+          status=${PIPESTATUS[0]}
+          echo "===== SUMMARY remedy=${{ matrix.remedy }} alr=${{ matrix.alr }} image=$ImageVersion exit=$status"
+          grep -E 'TEST RESULT|Total Tests Run|Successful Tests|Failed Assertions|Unexpected Errors|^FAIL |malformed file|CRATE .* TEST ENDED' "$RUNNER_TEMP/crate.log" || true
+          exit $status
