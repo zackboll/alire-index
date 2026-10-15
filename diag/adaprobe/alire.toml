@@ -1,0 +1,13 @@
+# Disposable diagnostic consumer for IMGPROC-ALIRE-003; copied into a fresh
+# checkout of tag 0.2.0 at CI time. The path pin targets that checkout only.
+name = "adaprobe"
+description = "Disposable Extract_Subpixel_Patch probe"
+version = "0.1.0"
+licenses = "Apache-2.0"
+executables = ["adaprobe"]
+
+[[depends-on]]
+opencv_imgproc = "*"
+
+[[pins]]
+opencv_imgproc = { path = ".." }

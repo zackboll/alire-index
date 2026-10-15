@@ -1,5 +1,5 @@
-# Disposable diagnostics for the macos-15-intel "Subpixel top-right" failure in
-# alire-project/alire-index#2230. Not intended for upstream submission.
+# IMGPROC-ALIRE-003 disposable diagnostics: macOS Intel IPP getRectSubPix
+# behaviour versus the opencv_imgproc 0.2.0 binding. Not for upstream use.
 name: Diag macOS Intel IPP subpixel
 
 on:
@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  probe:
-    name: probe ${{ matrix.os }}
+  native:
+    name: native ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -20,46 +20,95 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Homebrew OpenCV (as index CI)
         run: brew install opencv
-      - name: Build and run native getRectSubPix probe
+      - name: Build probes (optimised and sanitised)
         run: |
           echo "ImageOS=$ImageOS ImageVersion=$ImageVersion arch=$(uname -m)"
-          brew info --json=v2 opencv | python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print("opencv", f["installed"][0]["version"])'
+          sysctl -n machdep.cpu.brand_string || true
+          sysctl -n machdep.cpu.features machdep.cpu.leaf7_features 2>/dev/null | tr ' ' '\n' | grep -iE '^(SSE4.2|AVX1.0|AVX2|AVX512F)$' | tr '\n' ' '; echo
+          brew info --json=v2 opencv | python3 -c 'import json,sys; f=json.load(sys.stdin)["formulae"][0]; print("opencv bottle", f["installed"][0]["version"])'
           pc=$(pkg-config --exists opencv5 && echo opencv5 || echo opencv4)
-          xcrun clang++ -std=c++17 -O1 diag/ipp/probe.cpp $(pkg-config --cflags --libs $pc) -o probe
-          ./probe
+          xcrun clang++ -std=c++17 -O2 diag/ipp2/probe2.cpp $(pkg-config --cflags --libs $pc) -o probe2
+          xcrun clang++ -std=c++17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+            diag/ipp2/probe2.cpp $(pkg-config --cflags --libs $pc) -o probe2-asan
+      - name: Matrix under each OPENCV_IPP selection
+        run: |
+          for sel in unset disabled sse42 avx2 avx512; do
+            echo "################ OPENCV_IPP=$sel"
+            if [ $sel = unset ]; then ./probe2 > out-$sel.txt 2>&1; else OPENCV_IPP=$sel ./probe2 > out-$sel.txt 2>&1; fi
+            echo "exit=$?"
+            grep -E 'WARNING|ERROR|startup|cpu-features|build-info|mismatching|sweep|TOPRIGHT|IPPDIFF' out-$sel.txt
+          done
+          echo "################ full default output"; cat out-unset.txt
+      - name: Sanitised run (ASan + UBSan), IPP default and disabled
+        run: |
+          ASAN_OPTIONS=detect_leaks=0 ./probe2-asan > asan-default.txt 2>&1; echo "default exit=$?"
+          ASAN_OPTIONS=detect_leaks=0 OPENCV_IPP=disabled ./probe2-asan > asan-disabled.txt 2>&1; echo "disabled exit=$?"
+          echo "sanitizer reports: $(grep -cE 'ERROR: AddressSanitizer|runtime error' asan-default.txt asan-disabled.txt | tr '\n' ' ')"
+          grep -E 'ERROR: AddressSanitizer|runtime error' -A5 asan-*.txt | head -40 || true
 
-  suite:
-    name: suite ${{ matrix.os }} OPENCV_IPP=${{ matrix.ipp }}
+  ada:
+    name: ada binding ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         os: [macos-15-intel]
-        ipp: [default, disabled]
     steps:
       - name: Check out immutable Imgproc tag 0.2.0
         uses: actions/checkout@v4
         with:
           repository: zackboll/opencv_imgproc_ada
           ref: refs/tags/0.2.0
+          path: imgproc
+      - name: Check out diagnostics
+        uses: actions/checkout@v4
+        with:
+          path: diag
       - uses: alire-project/setup-alire@latest
         with:
           version: 2.1.1
       - name: Install Homebrew OpenCV (as index CI)
         run: brew install opencv
-      - name: Run full AUnit suite against indexed Core 0.4.1
-        shell: bash
+      - name: Verify identities and build
         run: |
-          git rev-parse HEAD
-          [ "$(git rev-parse HEAD)" = 08724e9ce0753546709345d5b657eff714748e04 ]
-          if [ "${{ matrix.ipp }}" = disabled ]; then export OPENCV_IPP=disabled; fi
-          echo "OPENCV_IPP=${OPENCV_IPP-<unset>} ImageVersion=$ImageVersion"
+          set -eu
+          [ "$(git -C imgproc rev-parse HEAD)" = 08724e9ce0753546709345d5b657eff714748e04 ]
+          [ "$(git -C imgproc rev-parse HEAD^{tree})" = 3c4c2c55d2be2133157b7cf5962d2d7700e20373 ]
+          echo "ImageOS=$ImageOS ImageVersion=$ImageVersion"
           alr -n toolchain --select gnat_native=16.1.0 gprbuild=26.0.1
+          cp -r diag/diag/adaprobe imgproc/adaprobe
+          cd imgproc/adaprobe
           alr -n build
-          alr -n -C tests show --solve | sed -n '/Dependencies (solution)/,$p'
-          alr -n -C tests run 2>&1 | tee "$RUNNER_TEMP/suite.log"
-          status=${PIPESTATUS[0]}
-          echo "===== SUMMARY OPENCV_IPP=${OPENCV_IPP-<unset>} exit=$status"
-          grep -E '^FAIL |Total Tests Run|Successful Tests|Failed Assertions|Unexpected Errors|IPP' "$RUNNER_TEMP/suite.log" || true
+          alr -n show --solve | sed -n '/Dependencies (solution)/,/Dependencies (graph)/p'
+          pc=$(pkg-config --exists opencv5 && echo opencv5 || echo opencv4)
+          xcrun clang++ -std=c++17 -O2 ../../diag/diag/ipp2/probe2.cpp $(pkg-config --cflags --libs $pc) -o ../../probe2
+      - name: Ada binding versus native production layout, IPP default and disabled
+        run: |
+          set -u
+          cd imgproc/adaprobe
+          status=0
+          for sel in unset disabled; do
+            if [ $sel = unset ]; then env_cmd=env; else env_cmd="env OPENCV_IPP=disabled"; fi
+            $env_cmd ../../probe2 canonical 2>&1 | grep -E 'startup'
+            $env_cmd ../../probe2 canonical | grep '^CANON' > native-$sel.txt
+            $env_cmd alr -n run 2>/dev/null | grep '^CANON' > ada-$sel.txt
+            echo "== OPENCV_IPP=$sel: native $(wc -l < native-$sel.txt) lines, ada $(wc -l < ada-$sel.txt) lines"
+            if diff native-$sel.txt ada-$sel.txt; then echo "ADA == NATIVE (byte-identical) under OPENCV_IPP=$sel"; else echo "ADA != NATIVE under OPENCV_IPP=$sel"; status=1; fi
+            grep -E 'CANON (u8>u8|u8>f32|f32>f32) 3x3 3.00,0.00' ada-$sel.txt
+          done
+          echo "== native IPP default vs disabled (lines that differ)"
+          diff native-unset.txt native-disabled.txt || true
           exit $status
+      - name: Exact AUnit suite (IPP default)
+        id: suite
+        continue-on-error: true
+        run: |
+          cd imgproc
+          alr -n build
+          alr -n -C tests run 2>&1 | tee "$RUNNER_TEMP/suite.log"
+          exit ${PIPESTATUS[0]}
+      - name: Suite summary
+        run: |
+          echo "suite outcome=${{ steps.suite.outcome }}"
+          grep -E '^FAIL |^    |^Total Tests Run|^Successful Tests|^Failed Assertions|^Unexpected Errors' "$RUNNER_TEMP/suite.log" | grep -B1 -A3 -E '^FAIL |Total' | head -20
