@@ -113,9 +113,47 @@ jobs:
         echo "SDKROOT=$sdk" >> "$GITHUB_ENV"
 
     - name: Set up devel `alr`
+      id: setup # HARNESS ONLY
       uses: alire-project/setup-alire@latest
       with:
         branch: 'master'
+        cache: false # HARNESS ONLY: always build and link alr from source
+
+    # HARNESS ONLY: evidence for the corrected setup on macOS ARM64.
+    - name: HARNESS - devel alr and GNAT link controls (macOS ARM64)
+      if: runner.os == 'macOS' && runner.arch == 'ARM64'
+      shell: bash
+      run: |
+        set -uo pipefail
+        echo "Runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}"
+        echo "SDKROOT=${SDKROOT:-<unset>}"
+        echo "setup-alire cache_hit=${{ steps.setup.outputs.cache_hit }}"
+        if [ "${{ steps.setup.outputs.cache_hit }}" != false ]; then
+          echo "::error::setup-alire did not build alr from source"
+          exit 1
+        fi
+        which alr
+        alr --version
+        file "$(which alr)"
+        probe_root="$RUNNER_TEMP/gnat-probe"
+        rm -rf "$probe_root" && mkdir -p "$probe_root" && cd "$probe_root"
+        alr -n -q init --bin sdk_probe >/dev/null && cd sdk_probe
+        alr -n exec -- gnat --version | head -n 1
+        echo "GNAT ld: $(alr -n exec -- gcc -print-prog-name=ld)"
+        echo "GNAT sysroot without SDKROOT: $(env -u SDKROOT alr -n exec -- gcc -print-sysroot)"
+        echo "GNAT sysroot with SDKROOT: $(alr -n exec -- gcc -print-sysroot)"
+        if env -u SDKROOT alr -n build -- -f > "$probe_root/default.log" 2>&1; then
+          echo "::notice title=Control::GNAT default sysroot LINKS on ${ImageVersion:-?} (image not affected)"
+        else
+          echo "::notice title=Control::GNAT default sysroot FAILS on ${ImageVersion:-?}"
+          grep -E 'malformed file|unknown architecture|arm64e\.x1' "$probe_root/default.log" | head -n 4
+        fi
+        if ! alr -n build -- -f > "$probe_root/selected.log" 2>&1; then
+          cat "$probe_root/selected.log"
+          echo "::error::GNAT link with SDKROOT failed"
+          exit 1
+        fi
+        ./bin/sdk_probe
 
     - name: Install tar from msys2 (Windows) # Git tar in Actions VM does not seem to work)
       if: matrix.os == 'windows-latest'
