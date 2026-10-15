@@ -40,14 +40,21 @@ jobs:
           done
           echo "################ full default output"; cat out-unset.txt
       - name: Sanitised run (ASan + UBSan), IPP default and disabled
+        shell: bash
         run: |
-          ASAN_OPTIONS=detect_leaks=0 ./probe2-asan > asan-default.txt 2>&1; echo "default exit=$?"
-          ASAN_OPTIONS=detect_leaks=0 OPENCV_IPP=disabled ./probe2-asan > asan-disabled.txt 2>&1; echo "disabled exit=$?"
-          echo "sanitizer reports: $(grep -cE 'ERROR: AddressSanitizer|runtime error' asan-default.txt asan-disabled.txt | tr '\n' ' ')"
-          grep -E 'ERROR: AddressSanitizer|runtime error' -A5 asan-*.txt | head -40 || true
+          set +e
+          for sel in unset disabled; do
+            if [ $sel = unset ]; then env_cmd=env; else env_cmd="env OPENCV_IPP=disabled"; fi
+            ASAN_OPTIONS=detect_leaks=0:abort_on_error=0 $env_cmd ./probe2-asan > asan-$sel.txt 2>&1
+            echo "################ sanitised OPENCV_IPP=$sel exit=$?"
+            grep -nE 'ERROR: AddressSanitizer|runtime error|SUMMARY|WARNING' asan-$sel.txt | head -20
+            awk '/ERROR: AddressSanitizer|runtime error/{f=1} f{print; if (++n > 60) exit}' asan-$sel.txt
+            tail -n 5 asan-$sel.txt
+          done
 
   ada:
     name: ada binding ${{ matrix.os }}
+    if: ${{ !contains(github.event.head_commit.message, '[native-only]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
